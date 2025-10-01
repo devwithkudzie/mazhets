@@ -1,52 +1,81 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView, View, Text, FlatList, StyleSheet, TouchableOpacity, RefreshControl, Image } from "react-native";
 import Feather from "@expo/vector-icons/Feather";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { products } from "../../../constants/dummyData";
 import ProductCard from "../../../components/ProductCard";
+import { supabase } from "../../../lib/supabase";
 
 export default function Storefront() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
+  const [profile, setProfile] = useState<any>(null);
+  const [listings, setListings] = useState<any[]>([]);
   const [sort, setSort] = useState<"new" | "price_asc" | "price_desc">("new");
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState("All");
 
-  const [localListings, setLocalListings] = useState<any[]>([]);
   useEffect(() => {
     (async () => {
-      try {
-        const raw = await AsyncStorage.getItem("@local_listings");
-        setLocalListings(raw ? JSON.parse(raw) : []);
-      } catch {}
+      // Fetch seller profile
+      const { data: profileData } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", id)
+        .single();
+      setProfile(profileData);
+
+      // Fetch listings for this seller
+      const { data: listingsData } = await supabase
+        .from("listings")
+        .select(`
+          *,
+          listing_images (
+            url,
+            sort_index
+          ),
+          profiles:user_id (
+            name,
+            id
+          )
+        `)
+        .eq("user_id", id)
+        .order("created_at", { ascending: false });
+      setListings(listingsData || []);
     })();
   }, [id]);
 
-  const sellerProducts = useMemo(() => {
-    const base = products.filter(p => p.seller?.id === String(id));
-    const mine = localListings.filter((p) => p?.seller?.id === String(id));
-    return [...mine, ...base];
-  }, [id, localListings]);
-  const sellerName = useMemo(() => sellerProducts[0]?.seller?.name || "Store", [sellerProducts]);
-  const coverImage = useMemo(() => {
-    const p = sellerProducts[0];
-    return (p as any)?.images?.[0] || p?.image || null;
-  }, [sellerProducts]);
-
+  // Sorting logic
   const sortedProducts = useMemo(() => {
-    const copy = [...sellerProducts];
-    if (sort === "price_asc") copy.sort((a, b) => Number(a.price.replace(/[^0-9.]/g, "")) - Number(b.price.replace(/[^0-9.]/g, "")));
-    else if (sort === "price_desc") copy.sort((a, b) => Number(b.price.replace(/[^0-9.]/g, "")) - Number(a.price.replace(/[^0-9.]/g, "")));
+    const copy = [...listings];
+    if (sort === "price_asc") copy.sort((a, b) => (a.price_cents ?? 0) - (b.price_cents ?? 0));
+    else if (sort === "price_desc") copy.sort((a, b) => (b.price_cents ?? 0) - (a.price_cents ?? 0));
     // default "new" keeps original order
     return copy;
-  }, [sellerProducts, sort]);
+  }, [listings, sort]);
+
+  // Dynamically get categories from listings
+  const categories = useMemo(() => {
+    const cats = Array.from(new Set(listings.map(l => l.category).filter(Boolean)));
+    return ["All", ...cats];
+  }, [listings]);
+
+  // Filter listings by category
+  const filteredProducts = useMemo(() => {
+    if (selectedCategory === "All") return sortedProducts;
+    return sortedProducts.filter((item) => item.category === selectedCategory);
+  }, [sortedProducts, selectedCategory]);
 
   const onRefresh = () => {
     setRefreshing(true);
     setTimeout(() => setRefreshing(false), 800);
   };
+
+  // Format join date
+  const joinDate = profile?.created_at
+    ? new Date(profile.created_at).getFullYear()
+    : "";
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
@@ -54,7 +83,7 @@ export default function Storefront() {
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} accessibilityLabel="Back">
           <Feather name="chevron-left" size={20} color="#111" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">{sellerName}</Text>
+        <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">{profile?.name || "Store"}</Text>
         <View style={{ flexDirection: "row", gap: 8 }}>
           <TouchableOpacity style={styles.iconBtn} onPress={() => router.push({ pathname: "/messages/[id]", params: { id } })} accessibilityLabel="Message seller">
             <Feather name="message-circle" size={18} color="#111" />
@@ -70,8 +99,8 @@ export default function Storefront() {
 
       {/* Cover image */}
       <View style={styles.coverWrap}>
-        {coverImage ? (
-          <Image source={coverImage} style={styles.coverImage} resizeMode="cover" />
+        {profile?.avatar_url ? (
+          <Image source={{ uri: profile.avatar_url }} style={styles.coverImage} resizeMode="cover" />
         ) : (
           <View style={[styles.coverImage, { backgroundColor: "#e9f1ff" }]} />
         )}
@@ -79,12 +108,16 @@ export default function Storefront() {
 
       {/* Seller header */}
       <View style={styles.sellerHeader}>
-        <View style={styles.avatar} />
+        {profile?.avatar_url ? (
+          <Image source={{ uri: profile.avatar_url }} style={styles.avatar} />
+        ) : (
+          <View style={styles.avatar} />
+        )}
         <View style={{ flex: 1 }}>
-          <Text style={styles.sellerName}>{sellerName}</Text>
+          <Text style={styles.sellerName}>{profile?.name || "Store"}</Text>
           <View style={styles.detailRowLine}>
             <View style={styles.detailItem}>
-              <Text style={styles.statNum}>{sellerProducts.length}</Text>
+              <Text style={styles.statNum}>{listings.length}</Text>
               <Text style={styles.stat}>listings</Text>
             </View>
             <View style={styles.detailItem}>
@@ -94,14 +127,42 @@ export default function Storefront() {
           </View>
           <View style={styles.detailRowLine}>
             <View style={styles.detailItem}>
-              <Text style={styles.stat}>Harare</Text>
+              <Text style={styles.stat}>{profile?.location || "Harare"}</Text>
             </View>
             <View style={styles.detailItem}>
-              <Text style={styles.stat}>Joined 2024</Text>
+              <Text style={styles.stat}>Joined {joinDate}</Text>
             </View>
           </View>
         </View>
-        {/* Actions moved to header */}
+      </View>
+
+      {/* Category filter UI */}
+      <View style={styles.categoriesRow}>
+        <FlatList
+          data={categories}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          keyExtractor={(cat) => cat}
+          contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={[
+                styles.categoryPill,
+                selectedCategory === item && styles.categoryPillActive,
+              ]}
+              onPress={() => setSelectedCategory(item)}
+            >
+              <Text
+                style={[
+                  styles.categoryText,
+                  selectedCategory === item && styles.categoryTextActive,
+                ]}
+              >
+                {item}
+              </Text>
+            </TouchableOpacity>
+          )}
+        />
       </View>
 
       {/* Sort & filters */}
@@ -121,7 +182,7 @@ export default function Storefront() {
       </View>
 
       <FlatList
-        data={sortedProducts}
+        data={filteredProducts}
         keyExtractor={(item) => item.id}
         numColumns={2}
         columnWrapperStyle={{ gap: 8, paddingHorizontal: 12 }}
@@ -136,7 +197,7 @@ export default function Storefront() {
         )}
         ListEmptyComponent={() => (
           <View style={{ padding: 24 }}>
-            <Text style={{ color: "#666" }}>No listings from this seller yet.</Text>
+            <Text style={{ color: "#666" }}>No listings in this category.</Text>
           </View>
         )}
       />
@@ -259,6 +320,31 @@ const styles = StyleSheet.create({
   },
   pillText: { color: "#111", fontSize: 12 },
   pillTextActive: { color: "#1877F2", fontWeight: "700" },
+  categoriesRow: {
+    flexDirection: "row",
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#eee",
+    backgroundColor: "#fff",
+  },
+  categoryPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: "#f7f7f7",
+  },
+  categoryPillActive: {
+    backgroundColor: "#e9f1ff",
+    borderColor: "#b9d4ff",
+  },
+  categoryText: {
+    color: "#111",
+    fontSize: 13,
+  },
+  categoryTextActive: {
+    color: "#1877F2",
+    fontWeight: "700",
+  },
 });
 
 

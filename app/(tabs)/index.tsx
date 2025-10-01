@@ -1,18 +1,17 @@
-import React, { useMemo, useState } from "react";
-import { FlatList, SafeAreaView, View, TextInput, StyleSheet, Text, ScrollView, TouchableOpacity, Modal, Pressable } from "react-native";
+import React, { useEffect, useState, useMemo } from "react";
+import { SafeAreaView, FlatList, TouchableOpacity, Text, View, StyleSheet, TextInput, ScrollView, Modal, Pressable } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import Feather from "@expo/vector-icons/Feather";
 import ProductCard from "../../components/ProductCard";
 import { SkeletonCard } from "../../components/Skeleton";
-import { products } from "../../constants/dummyData";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabase } from "../../lib/supabase"; // <-- Supabase client import
 
 export default function Home() {
   const router = useRouter();
   const params = useLocalSearchParams<{ category?: string; subcategory?: string }>();
   const [query, setQuery] = useState("");
-  const categories = ["All", "Electronics", "Fashion", "Shoes", "Phones", "Computers", "Accessories"];
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [recentQueries, setRecentQueries] = useState<string[]>([]);
   const [menuVisible, setMenuVisible] = useState(false);
@@ -30,21 +29,66 @@ export default function Home() {
     })();
   }, []);
 
+  // Remote listings from Supabase
+  const [remoteListings, setRemoteListings] = useState<any[]>([]);
+  const [loadingRemote, setLoadingRemote] = useState(true);
+
+  React.useEffect(() => {
+    (async () => {
+      setLoadingRemote(true);
+      const { data, error } = await supabase
+        .from("listings")
+        .select(`
+          *,
+          listing_images (
+            url,
+            sort_index
+          ),
+          profiles!listings_user_id_fkey (
+            name,
+            avatar_url
+          )
+        `)
+        .order("created_at", { ascending: false });
+      if (error) {
+        // Improved error logging
+        console.error("Error fetching listings:", JSON.stringify(error, null, 2));
+        setRemoteListings([]);
+      } else {
+        setRemoteListings(data || []);
+      }
+      setLoadingRemote(false);
+    })();
+  }, []);
+
+  // Count and sort categories by number of listings
+  const categories = useMemo(() => {
+    const counts: Record<string, number> = {};
+    [...localListings, ...remoteListings].forEach((l) => {
+      if (l.category) {
+        counts[l.category] = (counts[l.category] || 0) + 1;
+      }
+    });
+    const sorted = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat]) => cat);
+    return ["All", ...sorted];
+  }, [localListings, remoteListings]);
+
   // Filter products based on query & category
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const selectedFromParams = params.category || undefined;
     const subFromParams = params.subcategory || undefined;
     const effectiveCategory = selectedFromParams || selectedCategory;
-    // include locally created listings
-    // Note: local listings are loaded in ListHeader via effect below and saved in state
-    return [...localListings, ...products].filter((p) => {
-      const matchesQuery = q ? p.title.toLowerCase().includes(q) : true;
+    // include locally created listings and remote listings
+    return [...localListings, ...remoteListings].filter((p) => {
+      const matchesQuery = q ? p.title?.toLowerCase().includes(q) : true;
       const matchesCategory = effectiveCategory === "All" || !effectiveCategory ? true : p.category?.toLowerCase() === effectiveCategory.toLowerCase();
-      const matchesSub = subFromParams ? p.title.toLowerCase().includes(subFromParams.toLowerCase()) : true;
+      const matchesSub = subFromParams ? p.title?.toLowerCase().includes(subFromParams.toLowerCase()) : true;
       return matchesQuery && matchesCategory && matchesSub;
     });
-  }, [query, selectedCategory, params.category, params.subcategory, localListings]);
+  }, [query, selectedCategory, params.category, params.subcategory, localListings, remoteListings]);
 
   const onSubmitSearch = () => {
     const q = query.trim();
@@ -54,6 +98,35 @@ export default function Home() {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Category filter UI */}
+      <View style={styles.categoriesRow}>
+        <FlatList
+          data={categories}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          keyExtractor={(cat) => cat}
+          contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={[
+                styles.categoryPill,
+                selectedCategory === item && styles.categoryPillActive,
+              ]}
+              onPress={() => setSelectedCategory(item)}
+            >
+              <Text
+                style={[
+                  styles.categoryText,
+                  selectedCategory === item && styles.categoryTextActive,
+                ]}
+              >
+                {item}
+              </Text>
+            </TouchableOpacity>
+          )}
+        />
+      </View>
+
       {/* Product Grid with scrolling header */}
       <FlatList
         data={filtered}
@@ -140,6 +213,34 @@ export default function Home() {
           setShowFloatingHeader(y > 120);
         }}
         scrollEventThrottle={16}
+        refreshing={loadingRemote}
+        onRefresh={() => {
+          // Manual refresh for remote listings
+          setLoadingRemote(true);
+          supabase
+            .from("listings")
+            .select(`
+              *,
+              listing_images (
+                url,
+                sort_index
+              ),
+              profiles!listings_user_id_fkey (
+                name,
+                avatar_url
+              )
+            `)
+            .order("created_at", { ascending: false })
+            .then(({ data, error }) => {
+              if (error) {
+                console.error("Error fetching listings:", error);
+                setRemoteListings([]);
+              } else {
+                setRemoteListings(data || []);
+              }
+              setLoadingRemote(false);
+            });
+        }}
       />
 
       {/* Menu Modal */}
@@ -344,4 +445,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   floatingBrand: { fontSize: 18, fontWeight: "700", color: "#1877F2" },
+  categoriesRow: {
+    flexDirection: "row",
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#eee",
+    backgroundColor: "#fff",
+  },
+  categoryPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: "#f7f7f7",
+  },
+  categoryPillActive: {
+    backgroundColor: "#e9f1ff",
+    borderColor: "#b9d4ff",
+  },
+  categoryText: {
+    color: "#111",
+    fontSize: 13,
+  },
+  categoryTextActive: {
+    color: "#1877F2",
+    fontWeight: "700",
+  },
 });

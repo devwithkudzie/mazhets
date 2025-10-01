@@ -4,21 +4,49 @@ import { SafeAreaView, ScrollView, View, Text, Image, StyleSheet, TouchableOpaci
 import Feather from "@expo/vector-icons/Feather";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { products } from "../../../constants/dummyData";
 import { createOrUpdateChat } from "../../../constants/messages";
 import ImageGalleryModal from "../../../components/ImageGalleryModal";
 import ProductCard from "../../../components/ProductCard";
+import { supabase } from "../../../lib/supabase";
 
 export default function ProductDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
-  const product = products.find((p) => p.id === String(id));
+  const [remoteListings, setRemoteListings] = useState<any[]>([]);
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("listings")
+        .select(`
+          *,
+          listing_images (
+            url,
+            sort_index
+          ),
+          profiles!listings_user_id_fkey (
+            name,
+            avatar_url,
+            id
+          )
+        `)
+        .order("created_at", { ascending: false });
+      setRemoteListings(data || []);
+    })();
+  }, []);
+
+  // Use only remote listings
+  const product = useMemo(() => {
+    return remoteListings.find((p) => p.id === String(id));
+  }, [id, remoteListings]);
+
   const images = useMemo(() => {
-    const arr = (product as any)?.images as any[] | undefined;
-    if (arr && arr.length > 0) return arr;
-    return [product?.image].filter(Boolean) as any[];
+    if (product?.listing_images && product.listing_images.length > 0) {
+      return product.listing_images.map(img => ({ uri: img.url }));
+    }
+    return [];
   }, [product]);
+
   const { width } = Dimensions.get("window");
   const [activeIndex, setActiveIndex] = useState(0);
   const [showGallery, setShowGallery] = useState(false);
@@ -31,22 +59,24 @@ export default function ProductDetail() {
       try {
         const raw = await AsyncStorage.getItem(SAVED_KEY);
         const arr: string[] = raw ? JSON.parse(raw) : [];
-        setSaved(arr.includes(product.id));
+        setSaved(product?.id ? arr.includes(product.id) : false);
       } catch {}
     })();
-  }, [id]);
+  }, [id, product]);
 
   const toggleSave = async () => {
     try {
       const raw = await AsyncStorage.getItem(SAVED_KEY);
       const arr: string[] = raw ? JSON.parse(raw) : [];
       let next: string[];
-      if (arr.includes(product.id)) {
+      if (product?.id && arr.includes(product.id)) {
         next = arr.filter(x => x !== product.id);
         setSaved(false);
-      } else {
+      } else if (product?.id) {
         next = [product.id, ...arr.filter(x => x !== product.id)];
         setSaved(true);
+      } else {
+        next = arr;
       }
       await AsyncStorage.setItem(SAVED_KEY, JSON.stringify(next));
     } catch {}
@@ -67,12 +97,12 @@ export default function ProductDetail() {
     );
   }
 
-  const related = products
+  // Related items: use only remote listings
+  const related = remoteListings
     .filter((p) => p.id !== product.id)
     .map((p) => {
-      const sameSeller = p.seller?.id === product.seller?.id ? 1 : 0;
-      const sameCategoryHint = p.title.split(" ")[0] === product.title.split(" ")[0] ? 1 : 0;
-      // Higher score first
+      const sameSeller = p.user_id === product.user_id ? 1 : 0;
+      const sameCategoryHint = p.category === product.category ? 1 : 0;
       const score = sameSeller * 2 + sameCategoryHint;
       return { p, score };
     })
@@ -112,7 +142,7 @@ export default function ProductDetail() {
               try {
                 await Share.share({
                   title: product.title,
-                  message: `${product.title} • ${product.price}`,
+                  message: `${product.title} • ${product.price_cents ? `\$${(product.price_cents / 100).toFixed(2)}` : ""}`,
                   url: `https://mazhets.example/product/${product.id}`,
                 });
               } catch (e) {
@@ -179,22 +209,28 @@ export default function ProductDetail() {
         </View>
 
         <View style={styles.infoBlock}>
-          <Text style={styles.price}>{product.price}</Text>
+          <Text style={styles.price}>
+            {product.price_cents ? `\$${(product.price_cents / 100).toFixed(2)}` : ""}
+          </Text>
           <Text style={styles.title} numberOfLines={2}>{product.title}</Text>
           <View style={styles.metaRow}>
             <Feather name="map-pin" size={14} color="#666" />
-            <Text style={styles.metaText}>Harare, Zimbabwe</Text>
+            <Text style={styles.metaText}>{product.location || "Harare, Zimbabwe"}</Text>
             <View style={{ width: 10 }} />
             <Feather name="clock" size={14} color="#666" />
             <Text style={styles.metaText}>Listed 3 hours ago</Text>
           </View>
 
-          {/* Removed inline save/share; now in the header */}
-
-          <TouchableOpacity onPress={() => router.push(`/store/${product.seller.id}`)} style={styles.sellerRow}>
-            <View style={styles.sellerAvatar} />
+          <TouchableOpacity onPress={() => router.push(`/store/${product.profiles?.id}`)} style={styles.sellerRow}>
+            <View style={styles.sellerAvatar}>
+              {product.profiles?.avatar_url && (
+                <Image source={{ uri: product.profiles.avatar_url }} style={{ width: 40, height: 40, borderRadius: 20 }} />
+              )}
+            </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.sellerName}>{product.seller.name}</Text>
+              <Text style={styles.sellerName}>
+                {product.profiles?.name || "Unknown Seller"}
+              </Text>
               <Text style={styles.sellerSub}>See more from this seller</Text>
             </View>
             <Feather name="chevron-right" size={18} color="#777" />
@@ -202,9 +238,9 @@ export default function ProductDetail() {
 
           <View style={styles.detailsBlock}>
             <Text style={styles.sectionTitle}>Details</Text>
-            <Text style={styles.detailItem}><Text style={styles.detailKey}>Condition:</Text> Used - Like New</Text>
-            <Text style={styles.detailItem}><Text style={styles.detailKey}>Category:</Text> Electronics • Phones • Samsung</Text>
-            <Text style={styles.detailItem}><Text style={styles.detailKey}>Description:</Text> Clean item, works perfectly. Ready to use.</Text>
+            <Text style={styles.detailItem}><Text style={styles.detailKey}>Condition:</Text> {product.condition || "Unknown"}</Text>
+            <Text style={styles.detailItem}><Text style={styles.detailKey}>Category:</Text> {product.category || "Unknown"}</Text>
+            <Text style={styles.detailItem}><Text style={styles.detailKey}>Description:</Text> {product.description || "No description provided."}</Text>
           </View>
         </View>
 
@@ -245,10 +281,10 @@ export default function ProductDetail() {
             style={styles.bottomPrimary}
             onPress={() => {
               // Ensure a chat exists before navigating
-              createOrUpdateChat(product.seller.id, product.seller.name, "");
+              createOrUpdateChat(product.profiles?.id, product.profiles?.name, "");
               router.push({
                 pathname: "/messages/[id]",
-                params: { id: product.seller.id, productId: product.id, sellerName: product.seller.name },
+                params: { id: product.profiles?.id, productId: product.id, sellerName: product.profiles?.name },
               });
             }}
           >
